@@ -1,3 +1,5 @@
+from abc import abstractmethod
+from functools import cache
 from typing import Optional
 import warnings
 from matplotlib.pylab import cond
@@ -153,7 +155,7 @@ class NestedAffineCoupling(nn.Module):
                     NestedAffineCoupling(in_channels//2, in_channels//2, 
                                          level - i, masking_type, max_stack_level = max_stack_level, is_first_level = False, enforce_channel_on_base= enforce_channel_on_base, 
                                          name = f'{name}_flow2_{i}',*args, **kwargs) for i in sample_level])
-                self.condition_module = nn.ModuleList([ConditionalModule(in_channels//2, condition_channels) for i in sample_level])
+                self.condition_module = nn.ModuleList([DenseinResConditionalModule(in_channels//2, condition_channels) for i in sample_level])
             elif self.masking_type == 'spatial':
                 self.flow1 = nn.ModuleList([
                     NestedAffineCoupling(in_channels*2, in_channels*2, 
@@ -163,7 +165,7 @@ class NestedAffineCoupling(nn.Module):
                     NestedAffineCoupling(in_channels*2, in_channels*2, 
                                          level - i, masking_type, max_stack_level = max_stack_level, is_first_level = False, enforce_channel_on_base= enforce_channel_on_base, 
                                          name = f'{name}_flow2_{i}',*args, **kwargs) for i in sample_level])
-                self.condition_module = nn.ModuleList([ConditionalModule(in_channels*2, condition_channels) for i in sample_level])
+                self.condition_module = nn.ModuleList([DenseinResConditionalModule(in_channels*2, condition_channels) for i in sample_level])
 
         self.perm = nn.ModuleList([
                     InvertibleSequential(InvConv2dLU(in_channels),
@@ -185,6 +187,7 @@ class NestedAffineCoupling(nn.Module):
         if self.level == 0:
             x_change, x_id = self.masking_func.split(x)
             for i in range(self.stack_level):
+                x_change, x_id = self.masking_func.split(self.perm[i](self.masking_func.merge(x_change, x_id)))
                 if x_cond is not None:
                     st: torch.Tensor = self.net1[i](x_id, x_cond)
                 else:
@@ -204,7 +207,7 @@ class NestedAffineCoupling(nn.Module):
                 s2 = 2. * self.f_clamp(s2)
                 # print(self.name, s2.mean())
                 x_change2 = x_change2 * torch.exp(s2) + t2
-                x_id2, x_change2 = self.masking_func.split(self.perm[i](self.masking_func.merge(x_id2, x_change2)))
+                # x_id2, x_change2 = self.masking_func.split(self.perm[i](self.masking_func.merge(x_id2, x_change2)))
                 x_change, x_id = x_id2, x_change2
 
             return self.masking_func.merge(x_change, x_change2)
@@ -212,6 +215,7 @@ class NestedAffineCoupling(nn.Module):
         else:
             x_change, x_id = self.masking_func.split(x)
             for i in range(self.stack_level):
+                x_change, x_id = self.masking_func.split(self.perm[i](self.masking_func.merge(x_change, x_id)))
                 if x_cond is not None:
                     x_cond1 = self.condition_module[i](x_id, x_cond)
                     x_change = self.flow1[i](x_change, x_cond1)
@@ -226,43 +230,44 @@ class NestedAffineCoupling(nn.Module):
 
                 # print(x_change.shape, x_id.shape, x_cond.shape, i)
 
-                x_id2, x_change2 = self.masking_func.split(self.perm[i](self.masking_func.merge(x_id2, x_change2)))
+                # x_id2, x_change2 = self.masking_func.split(self.perm[i](self.masking_func.merge(x_id2, x_change2)))
                 x_change, x_id = x_id2, x_change2
 
             return self.masking_func.merge(x_id2, x_change2)
         
     def inverse(self, x: torch.Tensor, x_cond: Optional[torch.Tensor] = None):
         if self.level == 0:
-            x_id, x_change = self.masking_func.split(x)
+            x_id2, x_change2 = self.masking_func.split(x)
             for i in reversed(range(self.stack_level)):
-                x_id, x_change = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_id, x_change)))
+                # x_id2, x_change2 = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_id2, x_change2)))
                 if x_cond is not None:
-                    st: torch.Tensor = self.net2[i](x_id, x_cond)
+                    st2: torch.Tensor = self.net2[i](x_id2, x_cond)
                 else:
-                    st: torch.Tensor = self.net2[i](x_id)
-                s, t = st.chunk(2, 1)
-                s = 2. * self.f_clamp(s)
-                x_change = (x_change - t) / torch.exp(s)
-                # print(self.name, s.mean())
-                x_id2, x_change2 = x_change, x_id
-                if x_cond is not None:
-                    st2: torch.Tensor = self.net1[i](x_id2, x_cond)
-                else:
-                    st2: torch.Tensor = self.net1[i](x_id2)
+                    st2: torch.Tensor = self.net2[i](x_id2)
                 s2, t2 = st2.chunk(2, 1)
                 s2 = 2. * self.f_clamp(s2)
-                # print(self.name, s2.mean())
                 x_change2 = (x_change2 - t2) / torch.exp(s2)
-
+                # print(self.name, s.mean())
                 x_id, x_change = x_change2, x_id2
+                if x_cond is not None:
+                    st: torch.Tensor = self.net1[i](x_id, x_cond)
+                else:
+                    st: torch.Tensor = self.net1[i](x_id)
+                s, t = st.chunk(2, 1)
+                s = 2. * self.f_clamp(s)
+                # print(self.name, s2.mean())
+                x_change2 = (x_change2 - t) / torch.exp(s)
 
-            return self.masking_func.merge(x_change2, x_id2)
+                x_change, x_id = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_change, x_id)))
+                x_id2, x_change2 =  x_change, x_id
+
+            return self.masking_func.merge(x_change, x_id)
         
         else:
             x_id2, x_change2 = self.masking_func.split(x)
             for i in reversed(range(self.stack_level)):
                 # print(x_change2.shape, x_id2.shape, x_cond.shape, i)
-                x_id2, x_change2 = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_id2, x_change2)))
+                # x_id2, x_change2 = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_id2, x_change2)))
                 if x_cond is not None:
                     x_cond2 = self.condition_module[i](x_id2, x_cond)
                     x_change2 = self.flow2[i].inverse(x_change2, x_cond2)
@@ -275,6 +280,7 @@ class NestedAffineCoupling(nn.Module):
                 else:
                     x_change = self.flow1[i].inverse(x_change, x_id)
 
+                x_change, x_id = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_change, x_id)))
                 x_id2, x_change2 =  x_change, x_id
 
             return self.masking_func.merge(x_change, x_id)
@@ -307,8 +313,8 @@ class NestedAffineCoupling(nn.Module):
             if module.level != 0:
                 for mod in module.flow1:
                     inner_check(mod)
-                # for mod in module.flow2:
-                #     inner_check(mod)
+                for mod in module.flow2:
+                    inner_check(mod)
                 # We dont need to count flow2 as a coupling block should contain 2 "transformation"
         inner_check(self)
         if verbose:
@@ -376,15 +382,47 @@ class ConditionalModule(nn.Module):
             cond_channels = 0
         self.total_in_channels = in_channels + cond_channels
         self.in_norm = nn.InstanceNorm2d(self.total_in_channels)
-        self.pw_conv = nn.Conv2d(self.total_in_channels, in_channels, kernel_size=1, padding=0, bias=True)
+        self.condition_conv = nn.Conv2d(self.total_in_channels, in_channels, kernel_size=1, padding=0, bias=True)
+        self.pw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0, bias=True)
         self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False, groups= in_channels)
 
     def forward(self, x: torch.Tensor, x_cond: torch.Tensor):
         x_cond = F.interpolate(x_cond, x.shape[-2:])
         x = self.in_norm(torch.cat([x, x_cond], dim = 1))
-        x = F.relu(self.pw_conv(x))
-        x = self.dw_conv(x)
+        x = F.relu(self.condition_conv(x))
+        x = self.dw_conv(F.relu(self.pw_conv(x))) + x
         return x
+    
+class DenseinResConditionalModule(nn.Module):
+    def __init__(self, in_channels, cond_channels):
+        super().__init__()
+        if cond_channels is None:
+            cond_channels = 0
+        self.total_in_channels = in_channels + cond_channels
+        self.in_norm = nn.InstanceNorm2d(self.total_in_channels)
+        self.condition_conv = nn.Conv2d(self.total_in_channels, in_channels, kernel_size=1, padding=0, bias=True)
+        
+        self.pw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0, bias=True)
+        self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False, groups= in_channels)
+
+        self.pw_conv2 = nn.Conv2d(in_channels * 2, in_channels, kernel_size=1, padding=0, bias=True)
+        self.dw_conv2 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False, groups= in_channels)
+
+        self.pw_conv3 = nn.Conv2d(in_channels * 3, in_channels, kernel_size=1, padding=0, bias=True)
+        self.dw_conv3 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False, groups= in_channels)
+
+    def forward(self, x: torch.Tensor, x_cond: torch.Tensor):
+        x_cond = F.interpolate(x_cond, x.shape[-2:])
+        x = self.in_norm(torch.cat([x, x_cond], dim = 1))
+        x = F.relu(self.condition_conv(x))
+        x1 = self.dw_conv(F.relu(self.pw_conv(x))) + x
+
+        x2 = self.dw_conv2(F.relu(self.pw_conv2(torch.cat((x, x1), dim = 1)))) + x1
+
+        x3 = self.dw_conv3(F.relu(self.pw_conv3(torch.cat((x, x1, x2), dim = 1)))) + x2
+
+        return x3
+
     
 class MaskedSpatialMasking:
     @staticmethod
@@ -568,3 +606,10 @@ class Identity(nn.Module):
     def inverse(self, x):
         return x
     
+
+
+
+
+
+
+

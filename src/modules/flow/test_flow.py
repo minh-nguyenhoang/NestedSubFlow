@@ -165,30 +165,37 @@ class NestedAffineCoupling(nn.Module):
                                          name = f'{name}_flow2_{i}',*args, **kwargs) for i in sample_level])
                 self.condition_module = nn.ModuleList([ConditionalModule(in_channels*2, condition_channels) for i in sample_level])
 
-        self.perm = nn.ModuleList([
-                    InvertibleSequential(InvConv2dLU(in_channels),
-                                         InvertibleLeakyReLU(),
-                                         InvConv2dLU(in_channels)) for _ in range(self.stack_level)])
+        # self.perm = nn.ModuleList([
+        #             InvertibleSequential(InvConv2dLU(in_channels),
+        #                                  InvertibleLeakyReLU(),
+        #                                  InvConv2dLU(in_channels)) for _ in range(self.stack_level)])
+        
+        # self.norm = nn.ModuleList([
+        #             ActNorm(in_channels) for _ in range(self.stack_level)])
         
         self.norm = nn.ModuleList([
-                    ActNorm(in_channels) for _ in range(self.stack_level)])
+                    Identity(in_channels) for _ in range(self.stack_level)])
         
         self.perm = nn.ModuleList([
-                    InvertibleSequential(InvConv2dLU(in_channels),
+                    InvertibleSequential(Identity(in_channels),
                                          InvertibleLeakyReLU(),
-                                         InvConv2dLU(in_channels)) for _ in range(self.stack_level)])
+                                         Identity(in_channels)) for _ in range(self.stack_level)])
  
 
     def f_clamp(self, x: torch.Tensor):
         # return x/2.
         return 0.636 * torch.atan(x)
-
+    
     def forward(self, x: torch.Tensor, x_cond: Optional[torch.Tensor] = None):
         # print(self.level)
         if self.level == 0:
+            x_change, x_id = self.masking_func.split(x)
             for i in range(self.stack_level):
+                x_ = self.masking_func.merge(x_change, x_id)
+                x_ = self.norm[i](x_)
+                x_ = self.perm[i](x_)
                 
-                x_change, x_id = self.masking_func.split(x)
+                x_change, x_id = self.masking_func.split(x_)
                 if x_cond is not None:
                     st: torch.Tensor = self.net1[i](x_id, x_cond)
                 else:
@@ -210,16 +217,16 @@ class NestedAffineCoupling(nn.Module):
                 x_change2 = x_change2 * torch.exp(s2) + t2
                 
                 x_change, x_id = x_id2, x_change2
-                x = self.masking_func.merge(x_change, x_id)
-                x = self.norm[i](x)
-                x = self.perm[i](x)
 
-            return x
+            return self.masking_func.merge(x_change, x_change2)
         
         else:
+            x_change, x_id = self.masking_func.split(x)
             for i in range(self.stack_level):
-                
-                x_change, x_id = self.masking_func.split(x)
+                x_ = self.masking_func.merge(x_change, x_id)
+                x_ = self.norm[i](x_)
+                x_ = self.perm[i](x_)
+                x_change, x_id = self.masking_func.split(x_)
                 if x_cond is not None:
                     x_cond1 = self.condition_module[i](x_id, x_cond)
                     x_change = self.flow1[i](x_change, x_cond1)
@@ -234,19 +241,16 @@ class NestedAffineCoupling(nn.Module):
 
                 # print(x_change.shape, x_id.shape, x_cond.shape, i)
 
+                # x_id2, x_change2 = self.masking_func.split(self.perm[i](self.masking_func.merge(x_id2, x_change2)))
                 x_change, x_id = x_id2, x_change2
-                x = self.masking_func.merge(x_change, x_id)
-                x = self.norm[i](x)
-                x = self.perm[i](x)    
 
-            return x
+            return self.masking_func.merge(x_id2, x_change2)
         
     def inverse(self, x: torch.Tensor, x_cond: Optional[torch.Tensor] = None):
         if self.level == 0:
+            x_id, x_change = self.masking_func.split(x)
             for i in reversed(range(self.stack_level)):
-                x = self.perm[i].inverse(x)
-                x = self.norm[i].inverse(x)
-                x_id, x_change = self.masking_func.split(x)
+                # x_id, x_change = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_id, x_change)))
                 if x_cond is not None:
                     st: torch.Tensor = self.net2[i](x_id, x_cond)
                 else:
@@ -264,20 +268,19 @@ class NestedAffineCoupling(nn.Module):
                 s2 = 2. * self.f_clamp(s2)
                 # print(self.name, s2.mean())
                 x_change2 = (x_change2 - t2) / torch.exp(s2)
-
+                x_ = self.masking_func.merge(x_change2, x_id2)
+                x_ = self.perm[i].inverse(x_)
+                x_ = self.norm[i].inverse(x_)
+                x_change2, x_id2 = self.masking_func.split(x_)
                 x_id, x_change = x_change2, x_id2
-                x = self.masking_func.merge(x_id, x_change)
-                
 
-            return x
+            return self.masking_func.merge(x_change2, x_id2)
         
         else:
-            
+            x_id2, x_change2 = self.masking_func.split(x)
             for i in reversed(range(self.stack_level)):
                 # print(x_change2.shape, x_id2.shape, x_cond.shape, i)
-                x = self.perm[i].inverse(x)
-                x = self.norm[i].inverse(x)
-                x_id2, x_change2 = self.masking_func.split(x)
+                x_id2, x_change2 = self.masking_func.split(self.perm[i].inverse(self.masking_func.merge(x_id2, x_change2)))
                 if x_cond is not None:
                     x_cond2 = self.condition_module[i](x_id2, x_cond)
                     x_change2 = self.flow2[i].inverse(x_change2, x_cond2)
@@ -290,11 +293,125 @@ class NestedAffineCoupling(nn.Module):
                 else:
                     x_change = self.flow1[i].inverse(x_change, x_id)
 
+                x_ = self.masking_func.merge(x_change2, x_id2)
+                x_ = self.perm[i].inverse(x_)
+                x_ = self.norm[i].inverse(x_)
+                x_change, x_id = self.masking_func.split(x_)
                 x_id2, x_change2 =  x_change, x_id
-                x = self.masking_func.merge(x_id, x_change)
+
+            return self.masking_func.merge(x_change, x_id)
+    # def forward(self, x: torch.Tensor, x_cond: Optional[torch.Tensor] = None):
+    #     # print(self.level)
+    #     if self.level == 0:
+    #         for i in range(self.stack_level):
+                
+    #             x_change, x_id = self.masking_func.split(x)
+    #             if x_cond is not None:
+    #                 st: torch.Tensor = self.net1[i](x_id, x_cond)
+    #             else:
+    #                 st: torch.Tensor = self.net1[i](x_id)
+                
+    #             s, t = st.chunk(2, 1)
+    #             s = 2. * self.f_clamp(s)
+    #             # print(self.name, s.mean())
+    #             x_change = x_change * torch.exp(s) + t
+
+    #             x_change2, x_id2 = x_id, x_change
+    #             if x_cond is not None:
+    #                 st2: torch.Tensor = self.net2[i](x_id2, x_cond)
+    #             else:
+    #                 st2: torch.Tensor = self.net2[i](x_id2)
+    #             s2, t2 = st2.chunk(2, 1)
+    #             s2 = 2. * self.f_clamp(s2)
+    #             # print(self.name, s2.mean())
+    #             x_change2 = x_change2 * torch.exp(s2) + t2
+                
+    #             x_change, x_id = x_id2, x_change2
+    #             x = self.masking_func.merge(x_change, x_id)
+    #             x = self.norm[i](x)
+    #             x = self.perm[i](x)
+
+    #         return x
+        
+    #     else:
+    #         for i in range(self.stack_level):
+                
+    #             x_change, x_id = self.masking_func.split(x)
+    #             if x_cond is not None:
+    #                 x_cond1 = self.condition_module[i](x_id, x_cond)
+    #                 x_change = self.flow1[i](x_change, x_cond1)
+    #             else:
+    #                 x_change = self.flow1[i](x_change, x_id)
+    #             x_change2, x_id2 = x_id, x_change
+    #             if x_cond is not None:
+    #                 x_cond2 = self.condition_module[i](x_id2, x_cond)
+    #                 x_change2 = self.flow2[i](x_change2, x_cond2)
+    #             else:
+    #                 x_change2 = self.flow2[i](x_change2, x_id2)
+
+    #             # print(x_change.shape, x_id.shape, x_cond.shape, i)
+
+    #             x_change, x_id = x_id2, x_change2
+    #             x = self.masking_func.merge(x_change, x_id)
+    #             x = self.norm[i](x)
+    #             x = self.perm[i](x)    
+
+    #         return x
+        
+    # def inverse(self, x: torch.Tensor, x_cond: Optional[torch.Tensor] = None):
+    #     if self.level == 0:
+    #         for i in reversed(range(self.stack_level)):
+    #             x = self.perm[i].inverse(x)
+    #             x = self.norm[i].inverse(x)
+    #             x_id, x_change = self.masking_func.split(x)
+    #             if x_cond is not None:
+    #                 st: torch.Tensor = self.net2[i](x_id, x_cond)
+    #             else:
+    #                 st: torch.Tensor = self.net2[i](x_id)
+    #             s, t = st.chunk(2, 1)
+    #             s = 2. * self.f_clamp(s)
+    #             x_change = (x_change - t) / torch.exp(s)
+    #             # print(self.name, s.mean())
+    #             x_id2, x_change2 = x_change, x_id
+    #             if x_cond is not None:
+    #                 st2: torch.Tensor = self.net1[i](x_id2, x_cond)
+    #             else:
+    #                 st2: torch.Tensor = self.net1[i](x_id2)
+    #             s2, t2 = st2.chunk(2, 1)
+    #             s2 = 2. * self.f_clamp(s2)
+    #             # print(self.name, s2.mean())
+    #             x_change2 = (x_change2 - t2) / torch.exp(s2)
+
+    #             x_id, x_change = x_change2, x_id2
+    #             x = self.masking_func.merge(x_id, x_change)
                 
 
-            return x
+    #         return x
+        
+    #     else:
+            
+    #         for i in reversed(range(self.stack_level)):
+    #             # print(x_change2.shape, x_id2.shape, x_cond.shape, i)
+    #             x = self.perm[i].inverse(x)
+    #             x = self.norm[i].inverse(x)
+    #             x_id2, x_change2 = self.masking_func.split(x)
+    #             if x_cond is not None:
+    #                 x_cond2 = self.condition_module[i](x_id2, x_cond)
+    #                 x_change2 = self.flow2[i].inverse(x_change2, x_cond2)
+    #             else:
+    #                 x_change2 = self.flow2[i].inverse(x_change2, x_id2)
+    #             x_id, x_change = x_change2, x_id2
+    #             if x_cond is not None:
+    #                 x_cond1 = self.condition_module[i](x_id, x_cond)
+    #                 x_change = self.flow1[i].inverse(x_change, x_cond1)
+    #             else:
+    #                 x_change = self.flow1[i].inverse(x_change, x_id)
+
+    #             x_id2, x_change2 =  x_change, x_id
+    #             x = self.masking_func.merge(x_id, x_change)
+                
+
+    #         return x
         
     def check_masking_type(self):
         def inner_check(module: NestedAffineCoupling, check_level = []):
@@ -324,8 +441,8 @@ class NestedAffineCoupling(nn.Module):
             if module.level != 0:
                 for mod in module.flow1:
                     inner_check(mod)
-                # for mod in module.flow2:
-                #     inner_check(mod)
+                for mod in module.flow2:
+                    inner_check(mod)
                 # We dont need to count flow2 as a coupling block should contain 2 "transformation"
         inner_check(self)
         if verbose:
